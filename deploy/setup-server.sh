@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
 # ==============================================================
 # qr-app 服务器端一键安装脚本(需 root)
-# 用法(在项目根目录执行,源码也可直接放在 /opt/qr-app 下):
-#   sudo bash deploy/setup-server.sh
-# 脚本会:安装 Node.js(如缺失)→ 准备项目文件到 /opt/qr-app → 安装依赖
-#        → 生成 .env → 安装并启动 systemd 服务
+# 用法: sudo bash deploy/setup-server.sh
 # ==============================================================
 set -euo pipefail
 
-APP_NAME=qr-app
 INSTALL_DIR=/opt/qr-app
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -36,14 +32,20 @@ if ! command -v node >/dev/null 2>&1; then
   fi
 fi
 NODE_BIN="$(command -v node)"
+NODE_MAJOR="$("$NODE_BIN" -p 'process.versions.node.split(".")[0]')"
+if (( NODE_MAJOR < 18 )); then
+  echo "错误：需要 Node.js 18+，当前版本为 $("$NODE_BIN" -v)" >&2
+  exit 1
+fi
 echo "[1/6] Node $("$NODE_BIN" -v) -> $NODE_BIN"
 
 # 2) 准备项目文件到安装目录(不含 node_modules)
 SRC_DIR="$PROJECT_DIR"
 [[ -f "$SRC_DIR/server.js" ]] || SRC_DIR="$(pwd)"
+[[ -f "$SRC_DIR/server.js" && -f "$SRC_DIR/package.json" ]] || { echo "错误：找不到 server.js/package.json" >&2; exit 1; }
 echo "[2/6] 准备项目文件到 $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
-if [[ "$(cd "$SRC_DIR" 2>/dev/null && pwd -P)" == "$(cd "$INSTALL_DIR" 2>/dev/null && pwd -P)" ]]; then
+if [[ "$(cd "$SRC_DIR" && pwd -P)" == "$(cd "$INSTALL_DIR" && pwd -P)" ]]; then
   echo "      源码已位于 $INSTALL_DIR,跳过复制"
 else
   cp -f "$SRC_DIR/server.js" "$SRC_DIR/package.json" "$INSTALL_DIR/"
@@ -53,19 +55,19 @@ fi
 # 3) 安装依赖(仅生产依赖)
 echo "[3/6] 安装依赖..."
 cd "$INSTALL_DIR"
-npm install --omit=dev
+npm ci --omit=dev 2>/dev/null || npm install --omit=dev
 
-# 4) 生成环境变量文件
+# 4) 创建并填充环境变量文件
 if [[ ! -f "$INSTALL_DIR/.env" ]]; then
-  [[ -f "$SRC_DIR/deploy/qr-app.env.example" ]] && cp -f "$SRC_DIR/deploy/qr-app.env.example" "$INSTALL_DIR/.env"
-  echo "[4/6] 已生成 $INSTALL_DIR/.env —— 请编辑填入 SERVER_IP/UUID/PUBLIC_KEY/ACCESS_TOKEN 后重启服务"
-else
-  echo "[4/6] .env 已存在,保持不变"
+  cp "$SRC_DIR/deploy/qr-app.env.example" "$INSTALL_DIR/.env"
 fi
-chmod 600 "$INSTALL_DIR/.env"
+echo "[4/6] 自动生成运行参数..."
+bash "$SRC_DIR/deploy/generate-runtime-config.sh" "$INSTALL_DIR/.env"
 
 # 5) 安装并启动 systemd 服务
-echo "[5/6] 安装 systemd 服务..."
+ echo "[5/6] 安装 systemd 服务..."
+NODE_DIR="$(dirname "$NODE_BIN")"
+mkdir -p /etc/systemd/system
 sed "s|^ExecStart=.*|ExecStart=$NODE_BIN server.js|" "$SRC_DIR/deploy/qr-app.service" > /etc/systemd/system/qr-app.service
 systemctl daemon-reload
 systemctl enable --now qr-app
@@ -74,11 +76,18 @@ systemctl enable --now qr-app
 sleep 2
 echo "[6/6] 自检:"
 systemctl --no-pager --lines=5 status qr-app || true
-curl -s -o /dev/null -w "  本机访问 http://127.0.0.1:8080/ -> %{http_code}\n" \
-  -A "Mozilla/5.0 (qr-app-setup)" http://127.0.0.1:8080/ || true
+ACCESS_TOKEN="$(grep -E '^ACCESS_TOKEN=' "$INSTALL_DIR/.env" | tail -n 1 | cut -d= -f2-)"
+HTTP_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -A 'Mozilla/5.0 (qr-app-setup)' "http://127.0.0.1:8080/?k=${ACCESS_TOKEN}" || true)"
+echo "  本机二维码页面: HTTP ${HTTP_CODE:-无响应}"
+if [[ "$HTTP_CODE" != "200" ]]; then
+  echo "错误：本机 HTTP 自检未通过，请检查 journalctl -u qr-app。" >&2
+  exit 1
+fi
 
-echo ""
-echo "部署完成。常用命令:"
-echo "  查看状态: systemctl status qr-app"
-echo "  查看日志: journalctl -u qr-app -f (应用日志: $INSTALL_DIR/logs)"
-echo "  修改配置: vi $INSTALL_DIR/.env && systemctl restart qr-app"
+echo
+echo "部署完成。应用页面默认仅本机可访问： http://127.0.0.1:8080/?k=<ACCESS_TOKEN>"
+echo "查看令牌: sudo grep '^ACCESS_TOKEN=' $INSTALL_DIR/.env"
+echo "服务状态: sudo systemctl status qr-app"
+echo "服务日志: sudo journalctl -u qr-app -f"
+echo "请将 $INSTALL_DIR/reality-private-key 配置到你现有 Xray Reality 入站后，才能连接代理节点。"
+echo "需要公网访问时，请配置 HTTPS 反向代理并按需设置 TRUST_PROXY=1。"
