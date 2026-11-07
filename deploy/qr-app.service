@@ -1,0 +1,19 @@
+[Unit]
+Description=Reality QR Page HTTP Server (qr-app)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/qr-app
+EnvironmentFile=/opt/qr-app/.env
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=3
+# 进程崩溃/异常退出自动拉起;以下为资源与安全加固
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
